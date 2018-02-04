@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <title>Very simple chat</title>
+    </head>
+    <body>
+        <p>Hello, World!</p>
+        <script type="text/javascript">
+            var ws = new WebSocket('ws://localhost:8000/chat');
+            ws.onmessage = function(e) {
+                console.log(e.data);
+            }
+            ws.send('Hello me!');
+        </script>
+        <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.3.1/jquery.min.js"></script>
+    </body>
+</html>

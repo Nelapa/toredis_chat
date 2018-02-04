@@ -1,0 +1,24 @@
+Registration & authentication
+    + register user with login/password
+    * authenticate user with login/password, return token
+    * ws: check token is valid
+
+Chat
+    * common messages
+    * direct messages
+    * get active users list (ws events?)
+    * add/remove client to/from active users list
+
+Misc:
+    * xsrf protection
+    *? ssl
+    * error handling
+    * read settings from json
+    * LICENCE: MIT
+
+Write as unimplemented:
+    * DDOS/flood protection
+    * logging?
+    * SSL
+    * redis reconnection
+    * i18n
