@@ -1,3 +1,8 @@
-tornado
-toredis
+python-dateutil
+crypto
+jws
+python-jwt
+PyJWT
 mock
+toredis
+tornado

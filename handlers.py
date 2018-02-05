@@ -1,7 +1,11 @@
+import jwt
 import json
 import redis
 import toredis
 import datetime
+import dateutil.parser
+import uuid
+import hashlib
 
 import tornado.gen
 import tornado.web
@@ -12,6 +16,11 @@ import auth
 
 MIN_USERNAME_LEN = 2
 MIN_PASSWORD_LEN = 6
+
+MAX_USERNAME_LEN= 256
+MAX_PASSWORD_LEN= 256
+
+JWT_TOKEN_EXPIRE = datetime.timedelta(hours=1)
 
 
 def _get_redis_client(host, port, password):
@@ -33,13 +42,27 @@ class MainHandler(tornado.web.RequestHandler):
         self.render('index.html')
 
 
-class RegistrationJSONHandler(tornado.web.RequestHandler):
+class BaseAuthJSONHandler(tornado.web.RequestHandler):
+    def _get_redis_client(self):
+        return _get_redis_client(
+            host=self.settings['redis_host'],
+            port=self.settings['redis_port'],
+            password=self.settings['redis_password'],
+        )
+
+
+class RegistrationJSONHandler(BaseAuthJSONHandler):
     """
     Register new user with username and password
     """
-    @tornado.web.asynchronous
+    @tornado.gen.coroutine
     def post(self):
-        data = json.loads(self.request.body)
+        try:
+            data = json.loads(self.request.body)
+        except ValueError:
+            self.set_status(400)
+            self.finish(json.dumps({'errors': {'-non-field-errors-': 'Invalid JSON'}}))
+            return
 
         valid, errors = self.validate_registration_data(data)
         if not valid:
@@ -48,14 +71,10 @@ class RegistrationJSONHandler(tornado.web.RequestHandler):
             return
 
         user_key = u'user:{}'.format(data['username'])
-        user_data = json.dumps({
-            'password': data['password'],
-            'registered': datetime.datetime.now().isoformat()
-        })
-        client = self._get_redis_client()
-        client.setnx(user_key, user_data, callback=self.on_create)
+        user_data = self.dump_registration_data(data['password'])
 
-    def on_create(self, user_created):
+        client = self._get_redis_client()
+        user_created = yield tornado.gen.Task(client.setnx, user_key, user_data)
         if not user_created:
             self.set_status(400)
             self.finish(json.dumps({'errors': {'username': 'User already exists'}}))
@@ -74,29 +93,91 @@ class RegistrationJSONHandler(tornado.web.RequestHandler):
             errors['username'] = 'Username shorter than {} symbols is not permitted'.format(
                     MIN_USERNAME_LEN
             )
+        elif len(username) > MAX_USERNAME_LEN:
+            errors['username'] = 'Username longer than {} symbols is not permitted'.format(
+                    MAX_USERNAME_LEN
+            )
 
         if not password or len(password) < MIN_PASSWORD_LEN:
             errors['password'] = 'Password shorter than {} symbols is not permitted'.format(
                     MIN_PASSWORD_LEN
             )
+        elif len(username) > MAX_PASSWORD_LEN:
+            errors['username'] = 'Password longer than {} symbols is not permitted'.format(
+                    MAX_PASSWORD_LEN
+            )
         if errors:
             return False, errors
         return True, {}
 
-    def _get_redis_client(self):
-        return _get_redis_client(
-            host=self.settings['redis_host'],
-            port=self.settings['redis_port'],
-            password=self.settings['redis_password'],
+    def dump_registration_data(self, password):
+        salt = uuid.uuid4().hex
+        password_hash = hashlib.sha512(password+salt).hexdigest()
+        return json.dumps({
+            'password_hash': password_hash,
+            'salt': salt,
+            'registered': datetime.datetime.utcnow().isoformat()
+        })
+
+
+
+class LoginJSONHandler(BaseAuthJSONHandler):
+    """
+    Login user and issue jwt token for websocket connection
+    """
+    @tornado.gen.coroutine
+    def post(self):
+        try:
+            data = json.loads(self.request.body)
+        except ValueError:
+            self.set_status(400)
+            self.finish(json.dumps({'errors': {'-non-field-errors-': 'Invalid JSON'}}))
+            return
+
+        username = data.get('username')
+        password = data.get('password')
+        if not username or not password:
+            self.set_status(400)
+            self.finish(json.dumps({'errors': {'-non-field-errors-': 'Username and password required'}}))
+            return
+
+        client = self._get_redis_client()
+
+        user_key = u'user:{}'.format(data['username'])
+        user_data = yield tornado.gen.Task(client.get, user_key)
+        if user_data:
+            user_data = json.loads(user_data)
+            password_hash = user_data['password_hash']
+            salt = user_data['salt']
+            if password_hash == hashlib.sha512(password+salt).hexdigest():
+                self.set_cookie('jwt', self.create_token(username))
+                return
+        self.set_status(400)
+        self.write(json.dumps({'errors': {'-non-field-errors-': 'Invalid username or password'}}))
+        return
+
+    def create_token(self, username):
+        token = jwt.encode({
+                'username': username,
+                'expires': (datetime.datetime.utcnow() + JWT_TOKEN_EXPIRE).isoformat(),
+            },
+            key=self.settings['jwt_secret'],
+            algorithm='HS256'
         )
+        return token
 
 
-class LoginHandler(tornado.web.RequestHandler):
-    pass
 
+class LogoutJSONHandler(BaseAuthJSONHandler):
+    """
+    Log out by clearing cookies
 
-class LogoutHandler(tornado.web.RequestHandler):
-    pass
+    It prevents from creation of new web sockets but it's still possible
+    to use saved web socket
+    """
+    def post(self):
+        self.clear_cookie('jwt')
+        self.write(json.dumps({'type': 'info', 'message': 'Logged out'}))
 
 
 class ChatHandler(tornado.websocket.WebSocketHandler):
@@ -107,7 +188,7 @@ class ChatHandler(tornado.websocket.WebSocketHandler):
     and gives back received from redis channel messages back to client.
     """
     COMMON_CHANNEL = 'chat'
-    max_message_length = 10000
+    MAX_MESSAGE_LENGTH = 10000
 
     def open(self):
         """
@@ -115,51 +196,61 @@ class ChatHandler(tornado.websocket.WebSocketHandler):
         - check for auth token
         - ? add user to the list of active users
         """
+        self.username = self._auth_user()
+        if not self.username:
+            self.write_json_message('error', 'Not authenticated')
+            self.close()
+            return
         import random
         self._id = random.randint(0,100)
-        self.redis_client = toredis.Client()
-        self.redis_client.connect(
-            host=self.settings['redis_host'],
-            port=self.settings['redis_port'],
+        direct_channel = 'direct_channel:{}'.format(self.username)
+        self.redis_client = self._get_redis_client()
+        self.sub_redis_client = self._get_redis_client()
+        self.sub_redis_client.subscribe(
+            [self.COMMON_CHANNEL, direct_channel],
+            callback=self.show_new_message
         )
-        self.redis_client.auth(self.settings['redis_password'])
-        self.redis_client2 = toredis.Client()
-        self.redis_client2.connect(
-            host=self.settings['redis_host'],
-            port=self.settings['redis_port'],
-        )
-        self.redis_client2.auth(self.settings['redis_password'])
-        self.redis_client2.subscribe(self.COMMON_CHANNEL, callback=self.show_new_message)
-        print 'listening...'
+        self.write_json_message('info', 'Connected')
 
     @tornado.gen.coroutine
     def on_message(self, message):
         """
         Pipe message to Redis queue
         """
-        # TODO: handle validation
-        print self._id, 'sending message: ', message
-        self._validate_incoming_message(message)
-        yield self.redis_client.publish(
-            self.COMMON_CHANNEL,
-            message,
-        )
-        print self._id, 'message sent: ', message
+        try:
+            message = self._parse_incoming_message(message)
+        except InvalidMessageException as e:
+            self.write_json_message('error', e.message)
+        else:
+            message.update({
+                'author': self.username,
+                'sent': datetime.datetime.utcnow().isoformat()
+            })
+            yield self.publish_message(message)
 
     @classmethod
-    def _validate_incoming_message(cls, message):
-        # TODO
-        if not message:
+    def _parse_incoming_message(cls, message):
+        try:
+            message = json.loads(message)
+        except ValueError:
+            raise InvalidMessageException('Invalid json')
+        message_text = message.get('message')
+        if not message_text:
             raise InvalidMessageException('Message is empty, no reason to send it to anybody')
-        if len(message) > cls.max_message_length:
+        if len(message_text) > cls.MAX_MESSAGE_LENGTH:
             raise InvalidMessageException('Message is too long')
+        return message
 
     @tornado.gen.coroutine
     def show_new_message(self, message):
-        # TODO: filter out messages?
-        print self._id, 'received message:', message
+        if message[0] != 'message':
+            return
+        _, channel, json_message = message
+        direct = channel.startswith('direct_channel:')
+        json_message=json.loads(json_message)
+        json_message['direct'] = direct
         try:
-            yield self.write_message(u"Somebody's said: " + unicode(message))
+            yield self.write_message(json.dumps(json_message))
         except tornado.websocket.WebSocketClosedError:
             pass
 
@@ -168,4 +259,56 @@ class ChatHandler(tornado.websocket.WebSocketHandler):
         - remove user from the list of active users
         - shut down subscription event loop
         """
-        self.redis_client2.unsubscribe()
+        if hasattr(self, 'sub_redis_client'):
+            self.sub_redis_client.unsubscribe()
+
+    def write_json_message(self, message_type, message, **kwargs):
+        result = {
+            'type': message_type,
+            'message': message
+        }
+        if kwargs:
+            result.update(kwargs)
+        self.write_message(json.dumps(result))
+
+    @tornado.gen.coroutine
+    def publish_message(self, message_json):
+        recipient = message_json.get('to')
+        if recipient:
+            # skipping recipient check
+            channels = [
+                u'direct_channel:{}'.format(u)
+                for u in (self.username, recipient)
+            ]
+            message=json.dumps(message_json)
+            for channel in channels:
+                yield self.redis_client.publish(channel, message)
+        else:
+            yield self.redis_client.publish(
+                self.COMMON_CHANNEL,
+                json.dumps(message_json),
+            )
+
+    def _get_redis_client(self):
+        return _get_redis_client(
+            host=self.settings['redis_host'],
+            port=self.settings['redis_port'],
+            password=self.settings['redis_password'],
+        )
+
+    def _auth_user(self):
+        token = self.get_cookie('jwt')
+        if not token:
+            return None
+        try:
+            user_info = jwt.decode(token, key=self.settings['jwt_secret'], algorithm='HS256')
+            assert 'username' in user_info
+            assert 'expires' in user_info
+        except Exception as e:
+            return None
+        else:
+            expires = user_info['expires']
+            expires = dateutil.parser.parse(expires)
+            if expires < datetime.datetime.utcnow():
+                return None
+            return user_info['username']

@@ -11,13 +11,16 @@ class Application(tornado.web.Application):
         web_handlers = [
             (r'/', handlers.MainHandler),
             (r'/register', handlers.RegistrationJSONHandler),
+            (r'/login', handlers.LoginJSONHandler),
+            (r'/logout', handlers.LogoutJSONHandler),
             (r'/chat', handlers.ChatHandler),
         ]
 
         settings = dict(
             debug = True,  # todo: disable
+            jwt_secret='SECRET',
             # gzip=True,
-            # cookie_secret = '',
+            cookie_secret = 'COOKIE_SECRET',
             # xsrf_cookies = True
             # login_url = '/login',
             # autoescape?

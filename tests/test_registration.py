@@ -5,18 +5,13 @@ import toredis
 import unittest
 
 import tornado.testing
-import tornado.websocket
-import tornado.httpserver
-
-from tornado.httpclient import AsyncHTTPClient
 
 from app import Application
+
 
 def get_mock_client(user_created=1):
     def getter(host, port, password):
         _mock = mock.MagicMock()
-        _mock.get = tornado.gen.coroutine(lambda key: json.dumps({"password": "somepassword"}))
-        _mock.set = tornado.gen.coroutine(lambda key, value: None)
         _mock.setnx = tornado.gen.coroutine(lambda key, value: user_created)
         return _mock
     return getter
