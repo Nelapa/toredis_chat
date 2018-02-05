@@ -97,14 +97,14 @@ class RegistrationJSONHandler(BaseAuthJSONHandler):
             errors['username'] = 'Username longer than {} symbols is not permitted'.format(
                     MAX_USERNAME_LEN
             )
+        elif len(username) > MAX_PASSWORD_LEN:
+            errors['username'] = 'Password longer than {} symbols is not permitted'.format(
+                    MAX_PASSWORD_LEN
+            )
 
         if not password or len(password) < MIN_PASSWORD_LEN:
             errors['password'] = 'Password shorter than {} symbols is not permitted'.format(
                     MIN_PASSWORD_LEN
-            )
-        elif len(username) > MAX_PASSWORD_LEN:
-            errors['username'] = 'Password longer than {} symbols is not permitted'.format(
-                    MAX_PASSWORD_LEN
             )
         if errors:
             return False, errors
