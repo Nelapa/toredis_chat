@@ -201,8 +201,6 @@ class ChatHandler(ToredisMixin, tornado.websocket.WebSocketHandler):
             self.write_json_message('error', 'Not authenticated')
             self.close()
             return
-        import random
-        self._id = random.randint(0,100)
         direct_channel = 'direct_channel:{}'.format(self.username)
         self.redis_client = self._get_redis_client()
         self.sub_redis_client = self._get_redis_client()
