@@ -42,7 +42,7 @@ class MainHandler(tornado.web.RequestHandler):
         self.render('index.html')
 
 
-class BaseAuthJSONHandler(tornado.web.RequestHandler):
+class ToredisMixin(object):
     def _get_redis_client(self):
         return _get_redis_client(
             host=self.settings['redis_host'],
@@ -51,7 +51,7 @@ class BaseAuthJSONHandler(tornado.web.RequestHandler):
         )
 
 
-class RegistrationJSONHandler(BaseAuthJSONHandler):
+class RegistrationJSONHandler(ToredisMixin, tornado.web.RequestHandler):
     """
     Register new user with username and password
     """
@@ -121,7 +121,7 @@ class RegistrationJSONHandler(BaseAuthJSONHandler):
 
 
 
-class LoginJSONHandler(BaseAuthJSONHandler):
+class LoginJSONHandler(ToredisMixin, tornado.web.RequestHandler):
     """
     Login user and issue jwt token for websocket connection
     """
@@ -168,7 +168,7 @@ class LoginJSONHandler(BaseAuthJSONHandler):
 
 
 
-class LogoutJSONHandler(BaseAuthJSONHandler):
+class LogoutJSONHandler(tornado.web.RequestHandler):
     """
     Log out by clearing cookies
 
@@ -180,7 +180,7 @@ class LogoutJSONHandler(BaseAuthJSONHandler):
         self.write(json.dumps({'type': 'info', 'message': 'Logged out'}))
 
 
-class ChatHandler(tornado.websocket.WebSocketHandler):
+class ChatHandler(ToredisMixin, tornado.websocket.WebSocketHandler):
     """
     General chat handler for websocket requests
 
@@ -288,13 +288,6 @@ class ChatHandler(tornado.websocket.WebSocketHandler):
                 self.COMMON_CHANNEL,
                 json.dumps(message_json),
             )
-
-    def _get_redis_client(self):
-        return _get_redis_client(
-            host=self.settings['redis_host'],
-            port=self.settings['redis_port'],
-            password=self.settings['redis_password'],
-        )
 
     def _auth_user(self):
         token = self.get_cookie('jwt')
